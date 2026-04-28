@@ -1,0 +1,21 @@
+# Don't ship dev cruft into the production image
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+.env.local
+*.log
+.git/
+.gitignore
+.vscode/
+.idea/
+README.md
+docs/
+*.md
+smoke_test.py
+test_*.py
+run_windows.ps1

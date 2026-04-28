@@ -1,0 +1,47 @@
+# Fly.io app config — ERP Thaki backend.
+# Deploy with: flyctl deploy
+# First-time setup: flyctl launch (skip when prompted to create app from template)
+
+app = "erp-thaki"
+primary_region = "fra"  # Frankfurt — closest to Iraq with good free-tier availability
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  APP_ENV = "production"
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Don't auto-stop the machine — we want the API to be instantly responsive
+  # for demos. Free tier allows 3 always-on machines.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/v1/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
+
+# After deploy, set secrets with:
+#   flyctl secrets set SECRET_KEY="<long-random-string>"
+#   flyctl secrets set ANTHROPIC_API_KEY="sk-ant-..."
+#   flyctl secrets set GROQ_API_KEY="gsk_..."
+#   flyctl secrets set GEMINI_API_KEY="AIza..."
+#   flyctl secrets set ALLOWED_ORIGINS="https://erp.honey-bird.net,http://localhost:8080"
+#
+# Custom domain:
+#   flyctl certs create erp.honey-bird.net
+#   Then add an A record at your DNS provider pointing erp -> the IP from
+#   `flyctl ips list`. SSL provisions automatically within 1-2 minutes.
