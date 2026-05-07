@@ -377,6 +377,10 @@ _CARD_PHRASES: dict[str, dict[str, str]] = {
         "currency_invoices": "{curr} • {n} فاتورة",
         "plus_other_currencies": " + {n} عملات أخرى",
         "n_invoices": "{n} فاتورة",
+        "n_accounts": "{n} حساب",
+        "n_suppliers": "{n} مورد",
+        "n_customers": "{n} عميل",
+        "margin_with_revenue": "هامش {margin:.1f}% • إيراد {rev}",
     },
     "en": {
         "total_with_amount": "Total {amount} {curr}",
@@ -392,6 +396,10 @@ _CARD_PHRASES: dict[str, dict[str, str]] = {
         "currency_invoices": "{curr} • {n} invoices",
         "plus_other_currencies": " + {n} more currencies",
         "n_invoices": "{n} invoices",
+        "n_accounts": "{n} accounts",
+        "n_suppliers": "{n} suppliers",
+        "n_customers": "{n} customers",
+        "margin_with_revenue": "{margin:.1f}% margin • {rev} revenue",
     },
     "ckb": {
         "total_with_amount": "کۆی گشتی {amount} {curr}",
@@ -407,6 +415,10 @@ _CARD_PHRASES: dict[str, dict[str, str]] = {
         "currency_invoices": "{curr} • {n} پسوولە",
         "plus_other_currencies": " + {n} دراوی تر",
         "n_invoices": "{n} پسوولە",
+        "n_accounts": "{n} هەژمار",
+        "n_suppliers": "{n} دابینکەر",
+        "n_customers": "{n} کڕیار",
+        "margin_with_revenue": "هامش {margin:.1f}% • داهات {rev}",
     },
 }
 
@@ -500,6 +512,56 @@ async def refresh_card(
                         lang, "gross_with_margin",
                         gp=_fmt_money(gp), margin=margin,
                     )
+            elif "total_cash_and_bank" in result:
+                # get_cash_position — total + per-account list
+                card.value = _fmt_money(result.get("total_cash_and_bank") or 0)
+                accounts = result.get("accounts") or []
+                if accounts:
+                    card.rows = [
+                        {"label": a.get("account", ""), "value": a.get("balance", 0)}
+                        for a in accounts
+                    ]
+                    card.subtitle_ar = _phrase(lang, "n_accounts", n=len(accounts))
+                elif result.get("note"):
+                    # _get_company_currency may have returned the no-accounts note
+                    card.subtitle_ar = result["note"][:80]
+                else:
+                    card.subtitle_ar = _phrase(lang, "no_data")
+            elif "total_outstanding" in result and "by_supplier" in result:
+                # get_payables_summary — supplier ranking + total
+                card.value = _fmt_money(result.get("total_outstanding") or 0)
+                by_sup = result.get("by_supplier") or []
+                if by_sup:
+                    card.rows = [
+                        {"label": s.get("supplier_name") or s.get("supplier", ""),
+                         "value": s.get("outstanding", 0)}
+                        for s in by_sup
+                    ]
+                sup_count = result.get("supplier_count", len(by_sup))
+                card.subtitle_ar = _phrase(lang, "n_suppliers", n=sup_count)
+            elif "gross_profit" in result and "revenue" in result:
+                # get_gross_profit — headline number is gross profit, with
+                # the margin percentage as the subtitle.
+                card.value = _fmt_money(result.get("gross_profit") or 0)
+                margin = result.get("gross_margin_pct") or 0
+                rev = result.get("revenue") or 0
+                card.subtitle_ar = _phrase(
+                    lang, "margin_with_revenue",
+                    margin=margin, rev=_fmt_money(rev),
+                )
+            elif "top_customers" in result and "total_revenue" in result:
+                # get_customer_profitability — total revenue + ranking list
+                card.value = _fmt_money(result.get("total_revenue") or 0)
+                top_cust = result.get("top_customers") or []
+                if top_cust:
+                    card.rows = [
+                        {"label": c.get("customer", ""),
+                         "value": c.get("revenue", 0),
+                         "share_percent": c.get("share_percent", 0)}
+                        for c in top_cust
+                    ]
+                cust_count = result.get("customer_count", len(top_cust))
+                card.subtitle_ar = _phrase(lang, "n_customers", n=cust_count)
             elif "by_currency" in result:
                 # Multi-currency sales summary
                 bc = result["by_currency"]
@@ -534,10 +596,101 @@ async def refresh_card(
             card.subtitle_ar = _phrase(lang, "no_response")
     except Exception as e:
         logger.exception(f"refresh_card[{card.id}] failed")
-        card.value = _phrase(lang, "error_value")
-        card.subtitle_ar = str(e)[:80]
+        card.value = "—"
+        card.subtitle_ar = _friendly_error(e, lang, card.tool_name)
 
     return card
+
+
+# ───────────────────────────────────────────────────────────────────
+# Error-message classifier — turn raw Frappe/ERPNext exceptions into
+# human-readable, localized one-liners. The user is a non-technical
+# manager; pasting `{"exception":"frappe.exceptions..."}` into the
+# card subtitle is worse than useless.
+# ───────────────────────────────────────────────────────────────────
+
+# Tools that need the Accounts module / account-related role.
+# When one of these fails with a permission error, point the user at
+# the right ERPNext role rather than a generic "error".
+_TOOLS_NEEDING_ACCOUNTS = {
+    "get_cash_position",
+    "get_payables_summary",
+    "get_accounts_receivable",
+    "get_general_ledger",
+    "get_trial_balance",
+    "get_balance_sheet",
+    "get_profit_loss_report",
+    "get_cash_flow_report",
+    "get_gross_profit",
+    "get_executive_summary",
+    "get_expense_breakdown",
+}
+
+_ERR_PHRASES = {
+    "ar": {
+        "permission_accounts": "صلاحية محاسبة مطلوبة في ERPNext",
+        "permission_generic": "صلاحيات غير كافية في ERPNext",
+        "rate_limit": "تجاوز حد الطلبات اليومي",
+        "timeout": "انتهت مهلة الطلب",
+        "network": "فشل الاتصال بـ ERPNext",
+        "not_found": "المستند غير موجود",
+        "generic": "تعذّر تحميل البيانات",
+    },
+    "en": {
+        "permission_accounts": "Needs Accounts role in ERPNext",
+        "permission_generic": "Insufficient ERPNext permissions",
+        "rate_limit": "Daily request limit exceeded",
+        "timeout": "Request timed out",
+        "network": "Couldn't reach ERPNext",
+        "not_found": "Document not found",
+        "generic": "Couldn't load data",
+    },
+    "ckb": {
+        "permission_accounts": "ڕۆڵی Accounts پێویستە لە ERPNext",
+        "permission_generic": "مۆڵەتی پێویست لە ERPNext نییە",
+        "rate_limit": "سنووری ڕۆژانەی داواکاری بەسەرچوو",
+        "timeout": "کاتی داواکاری بەسەرچوو",
+        "network": "نەتوانرا پەیوەندی بکەیت بە ERPNext",
+        "not_found": "بەڵگەنامە نەدۆزرایەوە",
+        "generic": "نەتوانرا زانیاری باربکرێت",
+    },
+}
+
+
+def _friendly_error(e: Exception, lang: str, tool_name: str) -> str:
+    """Map a raw exception into a single localized line the user can act
+    on. Falls back to a generic message for anything we don't recognize.
+    """
+    table = _ERR_PHRASES.get(lang) or _ERR_PHRASES["ar"]
+    text = str(e).lower()
+
+    # Permission / 417 / Frappe role errors. Frappe surfaces these as
+    # "417 Expectation Failed" + a JSON body containing
+    # frappe.exceptions.PermissionError or frappe.exceptions.ValidationError
+    # ("not permitted").
+    permission_signals = (
+        "417",
+        "permission",
+        "not permitted",
+        "permissionerror",
+        "not allowed",
+    )
+    if any(sig in text for sig in permission_signals):
+        if tool_name in _TOOLS_NEEDING_ACCOUNTS:
+            return table["permission_accounts"]
+        return table["permission_generic"]
+
+    # Other common failure modes
+    if "429" in text or "rate limit" in text or "quota" in text:
+        return table["rate_limit"]
+    if "timeout" in text or "timed out" in text:
+        return table["timeout"]
+    if "connection" in text or "network" in text or "unreachable" in text:
+        return table["network"]
+    if "404" in text or "doesnotexist" in text or "not found" in text:
+        return table["not_found"]
+
+    return table["generic"]
 
 
 def _fmt_money(amount: float) -> str:

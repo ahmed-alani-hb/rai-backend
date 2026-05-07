@@ -179,13 +179,19 @@ class ERPNextClient:
 
         Useful when some fields may be permission-restricted or non-existent
         on a particular Frappe instance (e.g. base_* fields on Frappe Cloud).
+
+        Logged at INFO not WARNING — on Frappe Cloud the fallback fires on
+        every base_* field request as a matter of course; flagging it as
+        WARNING made monitoring noisy and made working dashboards look
+        broken in `gcloud logs tail`.
         """
         try:
             return await self.get_list(doctype, fields=preferred_fields, **kwargs)
         except ERPNextAPIError as e:
-            logger.warning(
-                f"get_list with {len(preferred_fields)} fields failed ({e}), "
-                f"retrying with {len(safe_fields)} safe fields"
+            logger.info(
+                f"get_list[{doctype}] field fallback fired "
+                f"({len(preferred_fields)} → {len(safe_fields)} fields). "
+                f"Reason: {str(e)[:80]}"
             )
             return await self.get_list(doctype, fields=safe_fields, **kwargs)
 
@@ -1431,20 +1437,25 @@ class ERPNextClient:
 
         Owner-friendly margin metric. Pulls Income (Revenue) and the
         "Cost of Goods Sold" account group from GL Entry.
+
+        Aggregates across all companies by default (holding-company
+        consolidated view). Pass `company` to scope to a single entity.
         """
-        company, base_currency = await self._get_company_currency(company)
+        _, base_currency = await self._get_company_currency(company)
 
         # Revenue: credit balance on Income accounts.
         # COGS:    debit balance on Cost of Goods Sold accounts.
+        filters: list[list[Any]] = [
+            ["posting_date", ">=", date_from],
+            ["posting_date", "<=", date_to],
+            ["is_cancelled", "=", 0],
+        ]
+        if company:
+            filters.insert(0, ["company", "=", company])
         gl = await self.get_list(
             "GL Entry",
             fields=["account", "debit", "credit", "account_type"],
-            filters=[
-                ["company", "=", company],
-                ["posting_date", ">=", date_from],
-                ["posting_date", "<=", date_to],
-                ["is_cancelled", "=", 0],
-            ],
+            filters=filters,
             limit=10000,
         )
 
@@ -1504,22 +1515,26 @@ class ERPNextClient:
 
         # Clamp to a reasonable window
         months = max(1, min(int(months), 36))
-        company, base_currency = await self._get_company_currency(company)
+        # Same holding-company logic — consolidate across subsidiaries
+        # by default; pass `company` explicitly to scope to one entity.
+        _, base_currency = await self._get_company_currency(company)
 
         today = datetime.utcnow().date()
         # Approximate start of the window
         start = (today.replace(day=1) - timedelta(days=31 * (months - 1))).replace(day=1)
 
+        filters: list[list[Any]] = [
+            ["posting_date", ">=", start.isoformat()],
+            ["posting_date", "<=", today.isoformat()],
+            ["docstatus", "=", 1],
+            ["status", "!=", "Return"],
+        ]
+        if company:
+            filters.insert(0, ["company", "=", company])
         invoices = await self.get_list(
             "Sales Invoice",
             fields=["posting_date", "base_grand_total", "grand_total", "status"],
-            filters=[
-                ["company", "=", company],
-                ["posting_date", ">=", start.isoformat()],
-                ["posting_date", "<=", today.isoformat()],
-                ["docstatus", "=", 1],
-                ["status", "!=", "Return"],
-            ],
+            filters=filters,
             limit=5000,
         )
 
@@ -1578,17 +1593,21 @@ class ERPNextClient:
         """
         from collections import defaultdict
 
-        company, base_currency = await self._get_company_currency(company)
+        # Same holding-company logic — consolidate across subsidiaries
+        # when no explicit company is passed.
+        _, base_currency = await self._get_company_currency(company)
 
+        filters: list[list[Any]] = [
+            ["posting_date", ">=", date_from],
+            ["posting_date", "<=", date_to],
+            ["is_cancelled", "=", 0],
+        ]
+        if company:
+            filters.insert(0, ["company", "=", company])
         gl = await self.get_list(
             "GL Entry",
             fields=["account", "debit", "credit", "account_type"],
-            filters=[
-                ["company", "=", company],
-                ["posting_date", ">=", date_from],
-                ["posting_date", "<=", date_to],
-                ["is_cancelled", "=", 0],
-            ],
+            filters=filters,
             limit=10000,
         )
 
@@ -1637,26 +1656,160 @@ class ERPNextClient:
         company: Optional[str] = None,
         as_of: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Current cash & bank balance for the company.
+        """Current cash & bank balance — consolidated across every
+        company the user has access to.
 
-        Sums GL Entry debit−credit on accounts of type Bank or Cash.
+        Why no company filter by default: many real ERPNext setups put
+        a holding company on top with zero transactions, with
+        operating subsidiaries under it doing all the actual work.
+        Filtering by the user's "default company" returns 0 in that
+        case. We instead aggregate across ALL companies and let the
+        caller pass `company` to scope down when they explicitly want
+        a single-entity view.
+
+        Implementation:
+          1. Fetch every account where account_type is Bank or Cash —
+             groups AND leaves, all companies. We classify by walking
+             the parent chain so leaves inherit type from ancestors.
+          2. Fall back to NAME-based detection ("Cash"/"Bank" in
+             account_name) when the chart skips account_type tagging.
+          3. Filter GL Entry by the resulting account list. Account
+             names are inherently company-scoped (`<num> - <name> -
+             <abbr>`), so this returns the right cash without an
+             extra company filter.
         """
         from collections import defaultdict
         from datetime import date as _date
 
-        company, base_currency = await self._get_company_currency(company)
+        # Resolve base currency for display, but DON'T constrain to a
+        # single company at the data layer. The caller can pass an
+        # explicit `company` when they want a single-entity view.
+        _, base_currency = await self._get_company_currency(company)
         as_of = as_of or _date.today().isoformat()
 
-        gl = await self.get_list(
-            "GL Entry",
-            fields=["account", "debit", "credit", "account_type"],
-            filters=[
-                ["company", "=", company],
-                ["posting_date", "<=", as_of],
-                ["is_cancelled", "=", 0],
-                ["account_type", "in", ["Bank", "Cash"]],
-            ],
-            limit=10000,
+        # Step 1 — accounts. Filter by company only if caller asked.
+        # Default: include accounts from every company so consolidated
+        # views work for holding-company setups.
+        account_filters: list[list[Any]] = []
+        if company:
+            account_filters.append(["company", "=", company])
+        all_accounts = await self.get_list(
+            "Account",
+            fields=["name", "account_type", "is_group", "parent_account",
+                    "account_name", "company"],
+            filters=account_filters,
+            limit=5000,
+        )
+        logger.info(
+            f"get_cash_position: company filter={company!r}, "
+            f"fetched {len(all_accounts)} accounts total"
+        )
+
+        by_name = {a["name"]: a for a in all_accounts}
+
+        def _is_cash_or_bank(acct: dict[str, Any]) -> bool:
+            """Walk the chain — return True if this account or any of
+            its ancestors has account_type in {Bank, Cash}."""
+            cur = acct
+            seen = set()
+            while cur and cur["name"] not in seen:
+                seen.add(cur["name"])
+                if cur.get("account_type") in ("Bank", "Cash"):
+                    return True
+                parent_name = cur.get("parent_account")
+                if not parent_name:
+                    return False
+                cur = by_name.get(parent_name)
+            return False
+
+        cash_accounts = [a for a in all_accounts if _is_cash_or_bank(a)]
+        logger.info(
+            f"get_cash_position: type-tagged Bank/Cash accounts: "
+            f"{len(cash_accounts)} → {[a['name'] for a in cash_accounts[:8]]}"
+        )
+
+        # Fallback: if the chart doesn't use account_type at all (no
+        # tagged accounts found), match by name. Both English ("Cash",
+        # "Bank") and Arabic ("نقد", "بنك") are common on Iraqi benches.
+        if not cash_accounts:
+            for a in all_accounts:
+                name = (a.get("account_name") or a["name"]).lower()
+                if any(needle in name for needle in
+                       ("cash", "bank", "نقد", "بنك", "صندوق", "مصرف")):
+                    cash_accounts.append(a)
+            logger.info(
+                f"get_cash_position: account_type tagging absent; "
+                f"name-based fallback found {len(cash_accounts)} accounts"
+            )
+
+        if not cash_accounts:
+            return {
+                "company": company,
+                "base_currency": base_currency,
+                "as_of": as_of,
+                "total_cash_and_bank": 0,
+                "accounts": [],
+                "note": "No Bank or Cash accounts found in chart of accounts.",
+            }
+
+        # Use leaf accounts for the GL Entry filter — entries only post
+        # to leaves, so including groups in the filter is harmless but
+        # a no-op.
+        leaf_names = [a["name"] for a in cash_accounts if not a.get("is_group")]
+        # Edge case: if EVERY tagged account is a group (no leaves yet),
+        # there can't be any GL entries anyway. Return 0 with a note.
+        if not leaf_names:
+            return {
+                "company": company,
+                "base_currency": base_currency,
+                "as_of": as_of,
+                "total_cash_and_bank": 0,
+                "accounts": [],
+                "note": "Bank/Cash account groups exist but have no leaf accounts yet.",
+            }
+        type_by_account = {
+            a["name"]: a.get("account_type") or "Cash"
+            for a in cash_accounts
+        }
+
+        # Step 2 — GL Entry filtered by account name only. Account
+        # names are company-scoped (`1100 - Cash In Hand - HBG` vs
+        # `1100 - Cash In Hand - SUB1`), so this implicitly scopes to
+        # the right entities without an explicit company filter, AND
+        # consolidates across subsidiaries when the holding company has
+        # no transactions of its own.
+        gl_filters: list[list[Any]] = [
+            ["posting_date", "<=", as_of],
+            ["account", "in", leaf_names],
+        ]
+        if company:
+            gl_filters.insert(0, ["company", "=", company])
+        try:
+            gl = await self.get_list(
+                "GL Entry",
+                fields=["account", "company", "debit", "credit"],
+                filters=gl_filters + [["is_cancelled", "=", 0]],
+                limit=10000,
+            )
+        except ERPNextAPIError as e:
+            if "is_cancelled" in str(e):
+                # Older Frappe — retry without is_cancelled
+                gl = await self.get_list(
+                    "GL Entry",
+                    fields=["account", "company", "debit", "credit"],
+                    filters=gl_filters,
+                    limit=10000,
+                )
+            else:
+                raise
+
+        # Surface which companies contributed for the diagnostic logs
+        # and the eventual UI breakdown.
+        contributing_companies = sorted({e.get("company") for e in gl if e.get("company")})
+        logger.info(
+            f"get_cash_position: fetched {len(gl)} GL entries across "
+            f"{len(contributing_companies)} compan(y/ies): "
+            f"{contributing_companies[:5]}"
         )
 
         per_account: dict[str, dict[str, Any]] = defaultdict(
@@ -1664,11 +1817,10 @@ class ERPNextClient:
         )
         for e in gl:
             acct = e.get("account") or "—"
-            atype = e.get("account_type") or ""
             net = (e.get("debit") or 0) - (e.get("credit") or 0)
             bucket = per_account[acct]
             bucket["account"] = acct
-            bucket["type"] = atype
+            bucket["type"] = type_by_account.get(acct, "")
             bucket["balance"] += net
 
         accounts = sorted(per_account.values(), key=lambda x: x["balance"], reverse=True)
@@ -1692,27 +1844,48 @@ class ERPNextClient:
         """How much we owe suppliers (Accounts Payable mirror of AR).
 
         Sums outstanding Purchase Invoices grouped by supplier.
+
+        Uses get_list_fallback so the query still succeeds when
+        `base_outstanding_amount` / `base_grand_total` are restricted
+        (Frappe Cloud field-level perms, single-currency setups,
+        older ERPNext versions). If base_* fields are gone, we fall
+        back to the transaction-currency `outstanding_amount` —
+        accurate enough for a supplier ranking on a single-currency
+        bench, less so when bills are mixed-currency.
         """
         from collections import defaultdict
         from datetime import date as _date
 
-        company, base_currency = await self._get_company_currency(company)
+        # Same holding-company logic as get_cash_position — only filter
+        # by company when caller explicitly passes one. Default
+        # behavior consolidates payables across every subsidiary.
+        _, base_currency = await self._get_company_currency(company)
         as_of = as_of or _date.today().isoformat()
 
-        invoices = await self.get_list(
+        preferred_fields = [
+            "name", "supplier", "supplier_name", "company",
+            "outstanding_amount", "base_outstanding_amount",
+            "grand_total", "base_grand_total",
+            "due_date", "posting_date", "status", "currency",
+        ]
+        # Minimal field set guaranteed to exist on every ERPNext version.
+        safe_fields = [
+            "name", "supplier", "supplier_name", "company",
+            "outstanding_amount", "grand_total",
+            "due_date", "posting_date", "status", "currency",
+        ]
+        filters = [
+            ["posting_date", "<=", as_of],
+            ["docstatus", "=", 1],
+            ["outstanding_amount", ">", 0],
+        ]
+        if company:
+            filters.insert(0, ["company", "=", company])
+        invoices = await self.get_list_fallback(
             "Purchase Invoice",
-            fields=[
-                "name", "supplier", "supplier_name",
-                "outstanding_amount", "base_outstanding_amount",
-                "grand_total", "base_grand_total",
-                "due_date", "posting_date", "status", "currency",
-            ],
-            filters=[
-                ["company", "=", company],
-                ["posting_date", "<=", as_of],
-                ["docstatus", "=", 1],
-                ["outstanding_amount", ">", 0],
-            ],
+            preferred_fields=preferred_fields,
+            safe_fields=safe_fields,
+            filters=filters,
             limit=2000,
         )
 
