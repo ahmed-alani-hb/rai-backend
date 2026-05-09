@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.core.config import get_settings
-from app.api import auth, chat, dashboard, health, transcribe
+from app.api import auth, chat, dashboard, erp, health, transcribe
 
 settings = get_settings()
 
@@ -36,6 +36,7 @@ app.include_router(health.router, prefix="/api/v1", tags=["health"])
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
 app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"])
+app.include_router(erp.router, prefix="/api/v1/erp", tags=["erp"])
 app.include_router(transcribe.router, prefix="/api/v1/transcribe", tags=["transcribe"])
 
 

@@ -23,6 +23,17 @@ class Settings(BaseSettings):
     erpnext_api_key: str = ""
     erpnext_api_secret: str = ""
 
+    # Honey Bird ERPNext — where RAI's own customer / subscription
+    # records live. Backend uses these admin credentials to create
+    # User + Customer + Subscription on signup, and to look up
+    # subscription status on every login. Different from a customer's
+    # own ERP — this one is RAI's billing system.
+    honeybird_url: str = "https://honeybird.frappe.cloud"
+    honeybird_admin_key: str = ""
+    honeybird_admin_secret: str = ""
+    # Free trial length in days, applied to every new signup.
+    rai_trial_days: int = 30
+
     odoo_url: str = ""
     odoo_db: str = ""
     odoo_username: str = ""
@@ -66,6 +77,8 @@ class Settings(BaseSettings):
         "groq_api_key",
         "erpnext_api_key",
         "erpnext_api_secret",
+        "honeybird_admin_key",
+        "honeybird_admin_secret",
         mode="before",
     )
     @classmethod

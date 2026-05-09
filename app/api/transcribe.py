@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from loguru import logger
 from openai import AsyncOpenAI
 
-from app.api.dependencies import CurrentUser, get_current_user
+from app.api.dependencies import CurrentUser, get_current_user, require_active_subscription
 from app.core.config import get_settings
 
 router = APIRouter()
@@ -19,7 +19,7 @@ settings = get_settings()
 @router.post("/audio")
 async def transcribe_audio(
     audio: Annotated[UploadFile, File()],
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(require_active_subscription)],
     language: Annotated[str, Form()] = "ar",
 ):
     """Transcribe an audio file (mp3/m4a/wav/webm/ogg) to Arabic text.

@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 
-from app.api.dependencies import CurrentUser, get_current_user
+from app.api.dependencies import CurrentUser, get_current_user, require_active_subscription
 from app.core.config import get_settings
 from app.models.schemas import ChatRequest, ChatResponse, ToolCallTrace
 from app.services.ai_router import AIRouter
@@ -180,7 +180,7 @@ class _AgentGaveUp(Exception):
 @router.post("", response_model=ChatResponse)
 async def chat(
     req: ChatRequest,
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(require_active_subscription)],
 ):
     erp = ERPNextClient(
         base_url=user.erp_url,

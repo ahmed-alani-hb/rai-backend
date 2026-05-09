@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from loguru import logger
 
-from app.api.dependencies import CurrentUser, get_current_user
+from app.api.dependencies import CurrentUser, get_current_user, require_active_subscription
 from app.models.dashboard import (
     DashboardCard, DashboardSpec, ModifyDashboardRequest, RefreshCardRequest,
 )
@@ -30,7 +30,7 @@ class GenerateDashboardRequest(BaseModel):
 
 @router.post("/generate", response_model=DashboardSpec)
 async def generate(
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(require_active_subscription)],
     req: GenerateDashboardRequest | None = None,
 ):
     erp = ERPNextClient(
@@ -51,7 +51,7 @@ async def generate(
 @router.post("/refresh_card", response_model=DashboardCard)
 async def refresh_card_endpoint(
     req: RefreshCardRequest,
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(require_active_subscription)],
 ):
     erp = ERPNextClient(
         base_url=user.erp_url,
@@ -64,7 +64,7 @@ async def refresh_card_endpoint(
 @router.post("/modify", response_model=ModifyDashboardResponse)
 async def modify_dashboard_endpoint(
     req: ModifyDashboardRequest,
-    user: Annotated[CurrentUser, Depends(get_current_user)],
+    user: Annotated[CurrentUser, Depends(require_active_subscription)],
 ):
     """Apply a user instruction to the current dashboard layout.
 

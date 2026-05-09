@@ -20,6 +20,10 @@ class CurrentUser:
         self.api_secret: str = payload.get("api_secret", "")
         self.roles: list[str] = payload.get("roles", [])
         self.full_name: str = payload.get("full_name", "")
+        # Subscription state from JWT — populated by /auth/login &
+        # /auth/signup. None / "active" / "trial" / "expired" / "cancelled".
+        self.sub_status: str = payload.get("sub_status", "active")
+        self.sub_days_remaining: int = payload.get("sub_days_remaining", 0)
 
 
 def get_current_user(
@@ -38,3 +42,26 @@ def get_current_user(
             detail="Token غير صالح أو منتهي الصلاحية",
         )
     return CurrentUser(payload)
+
+
+def require_active_subscription(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> CurrentUser:
+    """Drop-in replacement for `get_current_user` on routes that need
+    a paying / trialing user. Returns 402 Payment Required when the
+    JWT carries an expired/cancelled/none subscription so Flutter can
+    show the paywall instead of a generic error.
+
+    Active states: "active", "trial".
+    Blocked states: "expired", "cancelled", "none".
+    """
+    if user.sub_status not in ("active", "trial"):
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={
+                "code": "subscription_required",
+                "status": user.sub_status,
+                "message": "اشتراكك انتهى — يرجى التواصل مع مدير حسابك للتجديد.",
+            },
+        )
+    return user

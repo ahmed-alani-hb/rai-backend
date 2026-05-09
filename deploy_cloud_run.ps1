@@ -25,7 +25,7 @@ gcloud run deploy erp-thaki `
   --timeout 300 `
   --port 8000 `
   --set-env-vars "^@^APP_ENV=production@DEFAULT_AI_PROVIDER=groq@ALLOWED_ORIGINS=https://erp.honey-bird.net,http://localhost:8080" `
-  --set-secrets "SECRET_KEY=erp-secret-key:latest,ANTHROPIC_API_KEY=erp-anthropic-key:latest,GROQ_API_KEY=erp-groq-key:latest,GEMINI_API_KEY=erp-gemini-key:latest"
+  --set-secrets "SECRET_KEY=erp-secret-key:latest,ANTHROPIC_API_KEY=erp-anthropic-key:latest,GROQ_API_KEY=erp-groq-key:latest,GEMINI_API_KEY=erp-gemini-key:latest,HONEYBIRD_ADMIN_KEY=rai-honeybird-key:latest,HONEYBIRD_ADMIN_SECRET=rai-honeybird-secret:latest"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Deploy failed" -ForegroundColor Red
